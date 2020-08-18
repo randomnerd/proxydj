@@ -164,6 +164,7 @@ export class ProxyManager extends EventEmitter {
     buildProxyOptions(config: ProxyInstanceConfig, external: ExternalProxy): pm2.StartOptions {
         const args = [
             'http',
+            '-T tcp',
             `-p ${this.config.externalIp}:${config.port}`,
             `--log ${config.user}.log`,
             config.password
