@@ -23,13 +23,13 @@ export interface ProxyInstance {
 
 export interface ProxyConfig {
     binaryPath: string
-    logFile: string
-    useSSH: boolean
-    sshBinary: string
-    sshUser: string
-    sshHost: string
-    sshKey: string
-    externalIp: string
+    logFile?: string
+    useSSH?: boolean
+    sshBinary?: string
+    sshUser?: string
+    sshHost?: string
+    sshKey?: string
+    externalIp?: string[]
     instances: ProxyInstanceConfig[]
     proxyList: string[]
 }
