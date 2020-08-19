@@ -167,14 +167,13 @@ export class ProxyManager extends EventEmitter {
                 : `-P ${external.host}:${external.port}`,
         ]
         if (config.ipWhitelist?.length) config.ipWhitelist.forEach(ip => args.push(`--ip-allow ${ip}`))
-        if (this.config.logDir) args.push(`--log ${path.join(this.config.logDir, `user-${config.user}.log`)}`)
+        if (this.config.logDir) args.push(`--log user-${config.user}.log`)
         if (this.config.useSSH) {
             return [
                 this.config.sshBinary,
-                `-i ${this.config.sshKey}`,
+                `-i ${this.config.sshKey} -T`,
                 `${this.config.sshUser}@${this.config.sshHost}`,
-                this.config.binaryPath,
-                args
+                ...args
             ].join(' ')
         }
         return args.join(' ')
