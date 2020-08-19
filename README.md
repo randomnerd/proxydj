@@ -1,18 +1,29 @@
 # Proxy DJ
 
 ## Installation
+#### With source code
 - Install [node.js](https://nodejs.org/en/download/)
 - Clone this repo
-- Execute:
+- Execute in repo directory:
 ```bash
 npm i
 npm run build
 npm start
 ```
+#### With docker
+- Install [docker](https://www.docker.com/get-started)
+- Clone this repo
+- Execute in repo directory:
+
+```bash
+docker build . -t proxy-djay
+docker run --name proxy-djay --restart unless-stopped -p 31313:31313 proxy-djay
+```
+
 ## Configuration
 Edit `./config/default.js`
 ```javascript
-{
+module.exports = {
     // Indicates if we should use ssh connection
     // to machine running the proxy
     useSSH: false,
@@ -29,7 +40,7 @@ Edit `./config/default.js`
     // Path to use for the log file
     logFile: '/path/to/file.log',
     // External IP to bind client ports at
-    // (use 0.0.0.0 to bind at all addresses)
+    // (use 0.0.0.0 to bind at all addresses at once)
     externalIp: '0.0.0.0', 
     // Client ports configuration
     instances: [{
@@ -42,6 +53,9 @@ Edit `./config/default.js`
         port: 31337,
         // Interval (in seconds) for proxy switching
         rotationTime: 60,
+        // Array of IPs to allow client connections from
+        // All IPs are allowed if omitted
+        ipWhitelist: ['127.0.0.1']
     }],
     // List of external proxies 
     proxyList: [

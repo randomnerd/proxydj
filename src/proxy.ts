@@ -1,8 +1,8 @@
-import pm2, { Proc } from 'pm2'
 import debug from 'debug'
-import path from 'path'
-import { generate as randomString } from 'randomstring'
 import { EventEmitter } from 'events'
+import execa from 'execa'
+import { randomBytes } from 'crypto'
+import path from 'path'
 
 export interface ProxyInstanceConfig {
     user: string
@@ -14,16 +14,17 @@ export interface ProxyInstanceConfig {
 }
 
 export interface ProxyInstance {
-    proxy: Proc,
+    proxy: execa.ExecaChildProcess,
     external?: ExternalProxy
     lastExternal?: ExternalProxy
     rotationTimer?: NodeJS.Timer
+    logger: debug.Debugger
     readonly config: ProxyInstanceConfig
 }
 
 export interface ProxyConfig {
     binaryPath: string
-    logFile?: string
+    logDir?: string
     useSSH?: boolean
     sshBinary?: string
     sshUser?: string
@@ -43,8 +44,6 @@ export interface ExternalProxy {
 }
 
 export enum ProxyEvent {
-    pmConnected = 'pmConnected',
-    pmDisconnected = 'pmDisconnected',
     proxySpawned = 'proxySpawned',
     proxyStopped = 'proxyStopped',
     externalReleased = 'externalReleased',
@@ -53,7 +52,6 @@ export enum ProxyEvent {
 }
 
 export class ProxyManager extends EventEmitter {
-    pmConnected = false
     proxies: ExternalProxy[] = []
     instances: ProxyInstance[] = []
     logger = debug.default('ProxyManager:log')
@@ -62,28 +60,30 @@ export class ProxyManager extends EventEmitter {
         super()
         debug.enable('ProxyManager:*')
         this.loadProxyList(this.config.proxyList)
-        pm2.connect(true, e => this.onPMConnect(e))
+        process.on('SIGINT', () => {
+            this.shutdown()
+                .then(() => process.exit())
+                .catch(this.logger)
+        })
+        process.on('SIGTERM', () => {
+            this.shutdown()
+                .then(() => process.exit())
+                .catch(this.logger)
+        })
     }
 
-    onPMConnect(err: Error) {
-        if (err) {
-            this.pmConnected = false
-            return this.logger(err)
-        }
-        this.pmConnected = true
-        this.logger('PM2 connected')
-        this.emit(ProxyEvent.pmConnected)
+    shutdown() {
+        return Promise.all(this.instances.map(i => this.stopInstance(i)))
     }
 
     start() {
-        if (!this.pmConnected) throw new Error('PM2 is not connected')
         for (const instance of this.config.instances) {
             if (instance.disabled) continue
             this.spawnProxy(instance)
         }
     }
 
-    spawnProxy(config: ProxyInstanceConfig, prevExternal?: ExternalProxy) {
+    async spawnProxy(config: ProxyInstanceConfig, prevExternal?: ExternalProxy) {
         this.logger(`Spawning proxy for ${config.user} @ port ${config.port}...`)
         const external = this.findFreeExternalProxy(prevExternal)
         if (!external) {
@@ -91,112 +91,93 @@ export class ProxyManager extends EventEmitter {
             this.logger(error)
             return error
         }
-        const options = this.buildProxyOptions(config, external)
-        this.logger(`${options.script} ${(options.args as string[]).join(' ')}`)
+        const command = this.buildProxyCommand(config, external)
+        this.logger(command)
         external.inUse = true
         this.emit(ProxyEvent.externalOccupied, external, config)
-        pm2.start(options, (err, proxy) => this.onProxySpawned(err, proxy, config, external))
-        // this.onProxySpawned(null, <Proc>{}, config, external)
+        const proxy = execa.command(command, { all: true })
+        this.onProxySpawned(null, proxy, config, external)
     }
 
-    onProxySpawned(err: Error | null, proxy: Proc, config: ProxyInstanceConfig, external: ExternalProxy) {
+    onProxySpawned(err: Error | null, proxy: execa.ExecaChildProcess, config: ProxyInstanceConfig, external: ExternalProxy) {
+        const instance: ProxyInstance = { proxy, config, external, logger: this.logger.extend(`proxy:${config.user}:${proxy.pid}`) }
         if (err) {
-            this.logger(`Error spawning proxy for ${config.user}`, err)
-            setTimeout(() => this.spawnProxy(config), 10 * 1000)
+            instance.logger(`Error spawning proxy`, err)
             external.inUse = false
             this.emit(ProxyEvent.externalReleased, external)
+            setTimeout(() => this.spawnProxy(config), 10 * 1000)
+            return
         }
-        // this.logger(proxy[0])
-        this.logger(`Spawned proxy for ${config.user} @ port ${config.port} -> ${external.host}:${external.port} (ID ${proxy[0].pm_id})`)
-        const instance: ProxyInstance = { proxy, config, external }
+        proxy.catch().then(value => this.onProxyStopped(instance, value))
+        proxy.on('exit', () => this.onProxyStopped(instance))
+        instance.logger(`Spawned proxy @ port ${config.port} -> ${external.host}:${external.port}`)
         if (!isNaN(config.rotationTime)) instance.rotationTimer = setTimeout(() => {
             if (instance.rotationTimer) clearTimeout(instance.rotationTimer)
-            this.logger(`Rotation triggered for proxy ${config.user}`)
+            instance.logger(`Rotation triggered`)
             this.rotateInstance(instance)
         }, config.rotationTime * 1000)
 
-        // setInterval(() => {
-        //     this.logger(proxy[0])
-        // }, 10000)
         this.instances.push(instance)
         this.emit(ProxyEvent.proxySpawned, instance)
     }
 
-    stopInstance(instance: ProxyInstance, attempts = 10) {
-        const retryStop = (instance: ProxyInstance, attempts = 10) => {
-            return new Promise((resolve, reject) => {
-                pm2.stop(instance.proxy[0].name, e => {
-                    if (!e) return resolve(this.onProxyStopped(instance, e))
-                    if (attempts === 0) reject(new Error('Retry attempts exhausted'))
-                    setTimeout(() => this.stopInstance(instance)
-                        .catch(() => retryStop(instance, attempts - 1))
-                        .then(resolve), 1000)
-                })
-            })
-        }
-        return retryStop(instance, attempts)
+    stopInstance(instance: ProxyInstance) {
+        return new Promise((resolve, reject) => {
+            instance.proxy.catch(reject).then(resolve)
+            instance.proxy.cancel()
+        })
     }
 
-    onProxyStopped(instance: ProxyInstance, error?: Error) {
-        const { proxy, config, external, rotationTimer } = instance
-        if (error) {
-            this.logger(`Error stopping proxy for ${config.user}`, error)
-            return
+    async onProxyStopped(instance: ProxyInstance, output?: execa.ExecaReturnValue, error?: Error) {
+        const instanceIdx = this.instances.indexOf(instance)
+        if (instanceIdx === -1)  {
+            const ext = this.proxies.find(p => p.id === instance.external?.id)
+            if (ext) ext.inUse = false
+            instance.logger(`Proxy terminated, output:\n${output?.all}`)
         }
-        if (external) this.releaseExternal(external)
-        instance.lastExternal = external
+        this.instances.splice(instanceIdx, 1)
+        if (error) return instance.logger(`Error stopping proxy`, error)
+
+        if (instance.external) this.releaseExternal(instance.external)
+        instance.lastExternal = instance.external
         instance.external = undefined
-        if (rotationTimer) clearInterval(rotationTimer)
-        this.logger(`Stopped proxy for ${config.user} @ port ${config.port} (ID ${proxy[0].pm_id})`)
+        if (instance.rotationTimer) clearInterval(instance.rotationTimer)
         this.emit(ProxyEvent.proxyStopped, instance)
     }
 
     releaseExternal(external: ExternalProxy) {
         external.inUse = false
+        this.emit(ProxyEvent.externalReleased, external)
     }
 
     rotateInstance(instance: ProxyInstance) {
         return this.stopInstance(instance)
             .then(() => this.spawnProxy(instance.config, instance.lastExternal))
-            .catch(this.logger)
+            .catch(instance.logger)
     }
 
-    buildProxyOptions(config: ProxyInstanceConfig, external: ExternalProxy): pm2.StartOptions {
+    buildProxyCommand(config: ProxyInstanceConfig, external: ExternalProxy): string {
         const args = [
+            this.config.binaryPath,
             'http',
             '-T tcp',
             `-p ${this.config.externalIp}:${config.port}`,
-            `--log ${config.user}.log`,
             config.password
                 ? `-a ${config.user}:${config.password}:0:0:http://${external.host}:${external.port}`
                 : `-P ${external.host}:${external.port}`,
         ]
-        if (config.ipWhitelist?.length) config.ipWhitelist.forEach(ip => {
-            args.push(`--ip-allow ${ip}`)
-        })
-        const options: pm2.StartOptions = {
-            args,
-            force: true,
-            name: config.user,
-            min_uptime: 30 * 1000,
-            interpreter: 'none',
-            script: this.config.binaryPath,
-            output: `proxy-${config.user}-pm2.log`,
-            error: `proxy-${config.user}-pm2.log`,
-        }
+        if (config.ipWhitelist?.length) config.ipWhitelist.forEach(ip => args.push(`--ip-allow ${ip}`))
+        if (this.config.logDir) args.push(`--log ${path.join(this.config.logDir, `user-${config.user}.log`)}`)
         if (this.config.useSSH) {
-            const proxyExecString = [
-                this.config.binaryPath,
-                ...options.args as string[]
-            ].join(' ')
-            options.script = this.config.sshBinary
-            options.args = [
+            return [
+                this.config.sshBinary,
                 `-i ${this.config.sshKey}`,
                 `${this.config.sshUser}@${this.config.sshHost}`,
-                proxyExecString
-            ]
+                this.config.binaryPath,
+                args
+            ].join(' ')
         }
-        return options
+        return args.join(' ')
     }
 
     loadProxyList(list: string[]): ExternalProxy[] {
@@ -208,14 +189,14 @@ export class ProxyManager extends EventEmitter {
             }
             const [ host, port ] = item.split(':')
 
-            const proxy = {
+            const proxy: ExternalProxy = {
                 host,
                 port: Number(port),
                 inUse: false,
                 disabled: false
-            } as ExternalProxy
+            }
             if (this.findProxy(proxy)) continue
-            proxy.id = randomString(10)
+            proxy.id = randomBytes(8).toString('hex')
             proxyList.push(proxy)
             this.proxies.push(proxy)
             this.emit(ProxyEvent.externalAdded, proxy)

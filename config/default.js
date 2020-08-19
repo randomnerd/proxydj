@@ -1,16 +1,18 @@
 module.exports = {
     proxyConfig: {
-        useSSH: Number(process.env.USE_SSH) === 1,
+        useSSH: process.env.USE_SSH === undefined
+            ? false
+            : Number(process.env.USE_SSH) === 1,
         sshBinary: process.env.SSH_BINARY || '/usr/bin/ssh',
         sshHost: process.env.SSH_HOST || '45.76.78.165',
-        sshUser: process.env.SSH_USER || 'grem',
-        sshKey: process.env.SSH_KEY || ``,
+        sshUser: process.env.SSH_USER || 'randomnerd',
+        sshKey: process.env.SSH_KEY || `/home/randomnerd/.ssh/id_rsa`,
         binaryPath: process.env.PROXY_BIN || 'proxy',
-        logFile: process.env.LOG_FILE || 'proxy.log',
+        logDir: process.env.LOG_FILE || 'logs',
         externalIp: process.env.EXTERNAL_IP || '0.0.0.0',
         instances: [{
             user: 'new',
-
+            // password: 'test',
             port: 31111,
             rotationTime: 60, // seconds
         }],
