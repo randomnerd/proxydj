@@ -2,12 +2,12 @@
   "name": "proxy-djay",
   "version": "1.0.0",
   "description": "",
-  "main": "src/index.ts",
+  "main": "src/proxy-djay.ts",
   "scripts": {
-    "start": "node ./dist/index.js",
-    "start:dev": "nodemon ./src/index.ts",
+    "start": "node ./dist/proxy-djay.js",
+    "start:dev": "nodemon ./src/proxy-djay.ts",
     "build": "tsc",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build:bin": "mkdir -p dist/bin && pkg dist/proxy-djay.js --out-dir dist/bin && pushd dist/bin && for i in $(ls); do zip $i.zip $i;done && popd"
   },
   "author": "",
   "license": "ISC",
