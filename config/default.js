@@ -8,12 +8,13 @@ module.exports = {
         sshUser: process.env.SSH_USER || 'randomnerd',
         sshKey: process.env.SSH_KEY || `/home/randomnerd/.ssh/id_rsa`,
         binaryPath: process.env.PROXY_BIN || 'proxy',
-        logDir: process.env.LOG_FILE || 'logs',
+        logDir: process.env.LOG_DIR || 'logs',
+        retryInterval: 1,
         externalIp: process.env.EXTERNAL_IP || '0.0.0.0',
         instances: [{
             user: 'new',
             // password: 'test',
-            port: 31111,
+            port: [31111, 31112],
             rotationTime: 60, // seconds
         }],
         proxyList: [
