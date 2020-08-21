@@ -206,8 +206,11 @@ export class ProxyManager extends EventEmitter {
     }
 
     findFreeExternalProxy(excludeId?: string) {
-        return Object
+        const proxies = Object
             .values(this.proxies)
-            .find(p => p.id !== excludeId && !p.inUse)
+            .filter(p => p.id !== excludeId && !p.inUse)
+        if (!proxies.length) throw new Error('No free external proxies')
+        const index = Math.round(Math.random() * (proxies.length - 1))
+        return proxies[index]
     }
 }
