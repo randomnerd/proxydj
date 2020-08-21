@@ -18,6 +18,7 @@ export interface ProxyInstance {
     external: ExternalProxy
     rotationTimer?: NodeJS.Timer
     logger: debug.Debugger
+    rotating?: boolean
     readonly config: ProxyInstanceConfig
 }
 
@@ -137,11 +138,11 @@ export class ProxyManager extends EventEmitter {
 
     async onProxyStopped(id: string, output: execa.ExecaReturnValue) {
         if (!this.instances[id]) throw new Error(`Instance ${id} not found`)
-        const { config, external, logger, rotationTimer } = this.instances[id]
+        const { config, external, logger, rotationTimer, rotating } = this.instances[id]
         this.setExternalStatus(external.id, false)
         if (rotationTimer) clearTimeout(rotationTimer)
         logger(`Proxy terminated${output?.all ? `, output:\n${output.all}` : ''}`)
-        if (!output.isCanceled) {
+        if (!rotating) {
             const retryTime = this.config.retryInterval || 1
             logger(`Unexpected shutdown, restarting in ${retryTime} second(s)...`)
             setTimeout(() => {
@@ -159,6 +160,7 @@ export class ProxyManager extends EventEmitter {
 
     async rotateInstance(id: string) {
         const instance = this.instances[id]
+        instance.rotating = true
         if (!instance) throw new Error(`Instance ${id} not found`)
         await this.stopInstance(instance)
         await this.spawnProxy(instance.config, instance.external.id)
