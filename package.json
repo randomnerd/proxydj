@@ -4,8 +4,13 @@
   "description": "",
   "main": "src/proxy-djay.ts",
   "scripts": {
-    "start": "node ./dist/proxy-djay.js",
+    "start": "npm run build && node ./dist/proxy-djay.js",
     "start:dev": "nodemon ./src/proxy-djay.ts",
+    "start:daemon": "npm run build && pm2 start ./dist/proxy-djay.js",
+    "stop": "pm2 stop proxy-djay",
+    "logs": "pm2 logs proxy-djay",
+    "status": "pm2 status proxy-djay",
+    "monit": "pm2 monit proxy-djay",
     "build": "tsc",
     "build:bin": "mkdir -p dist/bin && pkg dist/proxy-djay.js --out-dir dist/bin && pushd dist/bin && for i in $(ls); do rm -f $i.zip; zip $i.zip $i;done && popd"
   },
@@ -22,6 +27,7 @@
     "config": "^3.3.1",
     "debug": "^4.1.1",
     "execa": "^4.0.3",
+    "pm2": "^4.4.1",
     "tslib": "^2.0.1"
   }
 }
