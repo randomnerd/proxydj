@@ -18,7 +18,7 @@ export interface ProxyInstance {
     external: ExternalProxy
     rotationTimer?: NodeJS.Timer
     logger: debug.Debugger
-    rotating?: boolean
+    stopping?: boolean
     readonly config: ProxyInstanceConfig
 }
 
@@ -65,20 +65,22 @@ export class ProxyManager extends EventEmitter {
         this.on(ProxyEvent.proxyStopped, (id, out) => this.onProxyStopped(id, out))
         // this.on(ProxyEvent.externalReleased, id => this.releaseExternal(id))
         // this.on(ProxyEvent.externalOccupied, id => this.occupyExternal(id))
+        const terminate = signal => {
+            this.shutdown(signal)
+                .then(() => {
+                    this.logger(`Terminating main process`)
+                    process.exit()
+                })
+                .catch(this.logger)
+        }
 
-        process.on('SIGINT', () => {
-            this.shutdown()
-                .then(() => process.exit())
-                .catch(this.logger)
-        })
-        process.on('SIGTERM', () => {
-            this.shutdown()
-                .then(() => process.exit())
-                .catch(this.logger)
-        })
+        process.on('SIGINT', terminate)
+        process.on('SIGTERM', terminate)
     }
 
-    shutdown() {
+    shutdown(signal?: NodeJS.Signals) {
+        this.logger(`Shutdown initiated${signal ? ` by signal ${signal}` : ''}`)
+        this.logger('Stopping all proxy instances...')
         const instances = Object.values(this.instances)
         return Promise.all(instances.map(i => this.stopInstance(i)))
     }
@@ -129,20 +131,21 @@ export class ProxyManager extends EventEmitter {
         }, rotationTime * 1000)
     }
 
-    stopInstance({ proxy }: ProxyInstance) {
+    stopInstance(instance: ProxyInstance) {
         return new Promise(resolve => {
-            proxy.finally(resolve)
-            proxy.cancel()
+            instance.stopping = true
+            instance.proxy.finally(resolve)
+            instance.proxy.cancel()
         })
     }
 
     async onProxyStopped(id: string, output: execa.ExecaReturnValue) {
         if (!this.instances[id]) throw new Error(`Instance ${id} not found`)
-        const { config, external, logger, rotationTimer, rotating } = this.instances[id]
+        const { config, external, logger, rotationTimer, stopping } = this.instances[id]
         this.setExternalStatus(external.id, false)
         if (rotationTimer) clearTimeout(rotationTimer)
         logger(`Proxy terminated${output?.all ? `, output:\n${output.all}` : ''}`)
-        if (!rotating) {
+        if (!stopping) {
             const retryTime = this.config.retryInterval || 1
             logger(`Unexpected shutdown, restarting in ${retryTime} second(s)...`)
             setTimeout(() => {
@@ -160,7 +163,6 @@ export class ProxyManager extends EventEmitter {
 
     async rotateInstance(id: string) {
         const instance = this.instances[id]
-        instance.rotating = true
         if (!instance) throw new Error(`Instance ${id} not found`)
         await this.stopInstance(instance)
         await this.spawnProxy(instance.config, instance.external.id)
