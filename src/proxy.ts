@@ -2,6 +2,8 @@ import debug from 'debug'
 import execa from 'execa'
 import { randomBytes } from 'crypto'
 import { EventEmitter } from 'events'
+import { writeFileSync, unlinkSync } from 'fs'
+import path from 'path'
 
 export interface ProxyInstanceConfig {
     user: string
@@ -25,6 +27,7 @@ export interface ProxyInstance {
 export interface ProxyConfig {
     binaryPath: string
     logDir?: string
+    tmpDir: string
     useSSH?: boolean
     sshBinary?: string
     sshUser?: string
@@ -117,6 +120,23 @@ export class ProxyManager extends EventEmitter {
         return this.instances[id]
     }
 
+    whiteListFilePath(config: ProxyInstanceConfig): string {
+        return path.join(this.config.tmpDir, `proxy-whitelist-${config.user}-${config.port}.tmp`)
+    }
+
+    makeWhitelistFile(config: ProxyInstanceConfig) {
+        if (!config.ipWhitelist?.length) return
+        const ipWhitelist = config.ipWhitelist.join('\n')
+        const filePath = this.whiteListFilePath(config)
+        writeFileSync(filePath, ipWhitelist)
+        this.logger(`Wrote whiteList file for ${config.user} @ port ${config.port}: ${filePath}`)
+        return filePath
+    }
+
+    removeWhitelistFile(config: ProxyInstanceConfig) {
+        try { unlinkSync(this.whiteListFilePath(config)) } catch {}
+    }
+
     onProxySpawned(id: string) {
         const instance = this.instances[id]
         if (!instance) throw new Error(`Instance ${id} not found`)
@@ -144,6 +164,7 @@ export class ProxyManager extends EventEmitter {
         const { config, external, logger, rotationTimer, stopping } = this.instances[id]
         this.setExternalStatus(external.id, false)
         if (rotationTimer) clearTimeout(rotationTimer)
+        if (config.ipWhitelist?.length) this.removeWhitelistFile(config)
         logger(`Proxy terminated${output?.all ? `, output:\n${output.all}` : ''}`)
         if (!stopping) {
             const retryTime = this.config.retryInterval || 1
@@ -175,9 +196,11 @@ export class ProxyManager extends EventEmitter {
             '-T tcp',
             `-p ${this.config.externalIp}:${config.port}`,
             `-P ${external.host}:${external.port}`,
+            '--always'
         ]
         if (config.password) args.push(`-a ${config.user}:${config.password}:0:0:`)
-        if (config.ipWhitelist?.length) config.ipWhitelist.forEach(ip => args.push(`--ip-allow ${ip}`))
+        // if (config.ipWhitelist?.length) config.ipWhitelist.forEach(ip => args.push(`--ip-allow ${ip}`))
+        if (config.ipWhitelist?.length) args.push(`--ip-allow ${this.makeWhitelistFile(config)}`)
         if (this.config.logDir) args.push(`--log ${this.config.logDir}/user-${config.user}-port-${config.port}.log`)
         if (this.config.useSSH) {
             return [
