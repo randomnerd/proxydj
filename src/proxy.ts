@@ -12,6 +12,8 @@ export interface ProxyInstanceConfig {
     rotationTime: number
     disabled?: boolean
     ipWhitelist?: string[]
+    maxConn?: number
+    expires?: number | string
 }
 
 export class ProxyInstance {
@@ -133,21 +135,26 @@ export class ProxyManager extends EventEmitter {
     start() {
         for (const instance of this.config.instances) {
             if (instance.disabled) continue
+            if (instance.expires && new Date(instance.expires) < new Date()) {
+                this.logger(`Config ${instance.user} expired`)
+                continue
+            }
             this.spawnProxies(instance)
         }
     }
 
-    spawnProxies(config: ProxyInstanceConfig): ProxyInstance[] {
+    spawnProxies(config: ProxyInstanceConfig) {
         const ports = Array.isArray(config.port) ? config.port: [config.port]
         return ports.map(port => this.spawnProxy({ ...config, port }))
     }
 
     spawnProxy(config: ProxyInstanceConfig, prevExternalId?: string) {
-        const external = this.findFreeExternalProxy(prevExternalId)
-        if (!external) throw new Error('No free external proxy found')
-
-        // const id = randomBytes(4).toString('hex')
         const id = `user-${config.user}-port-${config.port}`
+        let external
+        if (config.rotationTime > 0) {
+            external = this.findFreeExternalProxy(prevExternalId)
+            if (!external) throw new Error('No free external proxy found')
+        }
         const command = this.buildProxyCommand(config, external)
         this.logger(`Spawning proxy for ${config.user} @ port ${config.port}...\nCMD: ${command}`)
         const logger = debug(`proxy:${id}`)
@@ -186,10 +193,11 @@ export class ProxyManager extends EventEmitter {
     onProxySpawned(id: string) {
         const instance = this.instances[id]
         if (!instance) throw new Error(`Instance ${id} not found`)
-        this.setExternalStatus(instance.external.id, true)
         instance.writePidFile(this.config.tmpDir)
 
         const { port, rotationTime } = instance.config
+        if (!instance.external) return
+        this.setExternalStatus(instance.external.id, true)
         const { port: extPort, host: extHost } = instance.external
         instance.logger(`Spawned proxy#${id} @ port ${port} -> ${extHost}:${extPort}`)
         if (rotationTime > 0) instance.rotationTimer = setTimeout(() => {
@@ -237,16 +245,27 @@ export class ProxyManager extends EventEmitter {
         await this.spawnProxy(instance.config, instance.external.id)
     }
 
-    buildProxyCommand(config: ProxyInstanceConfig, external: ExternalProxy): string {
+    buildProxyCommand(config: ProxyInstanceConfig, external?: ExternalProxy): string {
         const args = [
             this.config.binaryPath,
             'sps',
-            `-S ${external.type}`,
+            `-S ${external?.type ?? 'http'}`,
             '-T tcp',
             `-p ${this.config.externalIp}:${config.port}`,
-            `-P ${external.host}:${external.port}`,
-            // '--always'
         ]
+        if (external) {
+            args.push(`-P ${external.host}:${external.port}`)
+            // args.push('--always')
+        } else {
+            for (const ext of Object.values(this.proxies)) {
+                if (ext.type !== ProxyType.HTTP) continue
+                args.push(`-P ${ext.host}:${ext.port}`)
+                //
+            }
+            // args.push('--lb-hashtarget')
+            args.push('--lb-method=hash')
+        }
+        if (typeof config.maxConn === 'number') args.push(`--max-conns ${config.maxConn}`)
         if (config.password) args.push(`-a ${config.user}:${config.password}:0:0:`)
         // if (config.ipWhitelist?.length) config.ipWhitelist.forEach(ip => args.push(`--ip-allow ${ip}`))
         if (config.ipWhitelist?.length) args.push(`--ip-allow ${this.makeWhitelistFile(config)}`)

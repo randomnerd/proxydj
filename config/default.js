@@ -16,7 +16,9 @@ module.exports = {
             user: 'new',
             // password: 'test',
             port: [31111, 31112],
+            maxConn: 10,
             rotationTime: 10, // seconds
+            expires: '2020-09-14T18:10:47.612Z'
         }],
         proxyList: [
             { id: 'port1', host: '190.2.153.140', port: 35490 },
