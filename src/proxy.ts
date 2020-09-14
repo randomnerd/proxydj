@@ -2,7 +2,7 @@ import debug from 'debug'
 import execa from 'execa'
 import { randomBytes } from 'crypto'
 import { EventEmitter } from 'events'
-import { writeFileSync, unlinkSync } from 'fs'
+import { writeFileSync, unlinkSync, existsSync, readFileSync } from 'fs'
 import path from 'path'
 
 export interface ProxyInstanceConfig {
@@ -14,14 +14,50 @@ export interface ProxyInstanceConfig {
     ipWhitelist?: string[]
 }
 
-export interface ProxyInstance {
+export class ProxyInstance {
     id: string
-    proxy: execa.ExecaChildProcess,
+    proxy: execa.ExecaChildProcess
     external: ExternalProxy
     rotationTimer?: NodeJS.Timer
     logger: debug.Debugger
     stopping?: boolean
     readonly config: ProxyInstanceConfig
+    get pidFilename(): string {
+        return `${this.id}.pid`
+    }
+
+    get logFilename(): string {
+        return `${this.id}.log`
+    }
+
+    writePidFile(dir: string) {
+        try {
+            writeFileSync(
+                path.join(dir, this.pidFilename),
+                this.proxy.pid.toString()
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    readPidFile(dir: string) {
+        const pidFile = path.join(dir, this.pidFilename)
+        if (!existsSync(pidFile)) return
+        try {
+            const pid = Number(readFileSync(pidFile).toString())
+            if (!isNaN(pid)) process.kill(pid, 'SIGINT')
+            return true
+        } catch {
+            unlinkSync(pidFile)
+            return false
+        }
+    }
+
+    constructor(initial?: Partial<ProxyInstance>) {
+        if (initial) Object.assign(this, initial)
+    }
 }
 
 export interface ProxyConfig {
@@ -35,16 +71,22 @@ export interface ProxyConfig {
     sshKey?: string
     externalIp?: string[]
     instances: ProxyInstanceConfig[]
-    proxyList: string[]
+    proxyList: ExternalProxy[]
     retryInterval?: number
 }
 
 export interface ExternalProxy {
     id: string
     disabled?: boolean
+    type?: ProxyType
     host: string
     port: number | string
     inUse?: boolean
+}
+
+export enum ProxyType {
+    SOCKS = 'socks',
+    HTTP = 'http',
 }
 
 export enum ProxyEvent {
@@ -104,17 +146,21 @@ export class ProxyManager extends EventEmitter {
         const external = this.findFreeExternalProxy(prevExternalId)
         if (!external) throw new Error('No free external proxy found')
 
-        const id = randomBytes(4).toString('hex')
+        // const id = randomBytes(4).toString('hex')
+        const id = `user-${config.user}-port-${config.port}`
         const command = this.buildProxyCommand(config, external)
         this.logger(`Spawning proxy for ${config.user} @ port ${config.port}...\nCMD: ${command}`)
-        const logger = debug(`proxy:${id}:${config.user}:${config.port}`)
+        const logger = debug(`proxy:${id}`)
+        const instance = new ProxyInstance({ id, config, external, logger })
+        instance.readPidFile(this.config.tmpDir)
         const proxy = execa.command(command, {
             all: true,
             reject: false,
             stripFinalNewline: false
         })
+        instance.proxy = proxy
         proxy.then(out => this.emit(ProxyEvent.proxyStopped, id, out))
-        this.instances[id] = { id, proxy, config, external, logger }
+        this.instances[id] = instance
 
         if (proxy.pid) this.emit(ProxyEvent.proxySpawned, id)
         return this.instances[id]
@@ -141,6 +187,7 @@ export class ProxyManager extends EventEmitter {
         const instance = this.instances[id]
         if (!instance) throw new Error(`Instance ${id} not found`)
         this.setExternalStatus(instance.external.id, true)
+        instance.writePidFile(this.config.tmpDir)
 
         const { port, rotationTime } = instance.config
         const { port: extPort, host: extHost } = instance.external
@@ -154,14 +201,15 @@ export class ProxyManager extends EventEmitter {
     stopInstance(instance: ProxyInstance) {
         return new Promise(resolve => {
             instance.stopping = true
-            instance.proxy.finally(resolve)
-            instance.proxy.cancel()
+            instance.proxy?.finally(resolve)
+            instance.proxy?.cancel()
         })
     }
 
     async onProxyStopped(id: string, output: execa.ExecaReturnValue) {
         if (!this.instances[id]) throw new Error(`Instance ${id} not found`)
         const { config, external, logger, rotationTimer, stopping } = this.instances[id]
+        this.instances[id].readPidFile(this.config.tmpDir)
         this.setExternalStatus(external.id, false)
         if (rotationTimer) clearTimeout(rotationTimer)
         if (config.ipWhitelist?.length) this.removeWhitelistFile(config)
@@ -192,16 +240,18 @@ export class ProxyManager extends EventEmitter {
     buildProxyCommand(config: ProxyInstanceConfig, external: ExternalProxy): string {
         const args = [
             this.config.binaryPath,
-            'http',
+            'sps',
+            `-S ${external.type}`,
             '-T tcp',
             `-p ${this.config.externalIp}:${config.port}`,
             `-P ${external.host}:${external.port}`,
-            '--always'
+            // '--always'
         ]
         if (config.password) args.push(`-a ${config.user}:${config.password}:0:0:`)
         // if (config.ipWhitelist?.length) config.ipWhitelist.forEach(ip => args.push(`--ip-allow ${ip}`))
         if (config.ipWhitelist?.length) args.push(`--ip-allow ${this.makeWhitelistFile(config)}`)
-        if (this.config.logDir) args.push(`--log ${this.config.logDir}/user-${config.user}-port-${config.port}.log`)
+        const filename = `user-${config.user}-port-${config.port}`
+        if (this.config.logDir) args.push(`--log ${this.config.logDir}/${filename}.log`)
         if (this.config.useSSH) {
             return [
                 this.config.sshBinary,
@@ -213,16 +263,19 @@ export class ProxyManager extends EventEmitter {
         return args.join(' ')
     }
 
-    loadProxyList(list: string[]): ExternalProxy[] {
+    loadProxyList(list: ExternalProxy[]): ExternalProxy[] {
         for (const item of list) {
             try {
-                const [ host, port ] = item.split(':')
-                const id = randomBytes(8).toString('hex')
-                // this.logger(`Added external proxy ${host}:${port}`)
-                this.proxies[id] = { id, host, port, inUse: false, disabled: false }
-                this.emit(ProxyEvent.externalAdded, this.proxies[id])
+                const proxy = {
+                    ...item,
+                    id : item.id ?? randomBytes(8).toString('hex'),
+                    type: item.type ?? ProxyType.HTTP,
+                    inUse: false
+                }
+                this.proxies[proxy.id] = proxy
+                this.emit(ProxyEvent.externalAdded, proxy)
             } catch (error) {
-                this.logger(`Invalid proxy: ${item}`, error)
+                this.logger(`Invalid proxy`, item, error)
             }
         }
         return Object.values(this.proxies)

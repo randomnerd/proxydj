@@ -5,7 +5,7 @@
   "main": "src/proxy-djay.ts",
   "scripts": {
     "start": "npm run build && node ./dist/proxy-djay.js",
-    "start:dev": "nodemon ./src/proxy-djay.ts",
+    "start:dev": "nodemon -e js,ts,json ./src/proxy-djay.ts",
     "start:daemon": "npm run build && pm2 start ./dist/proxy-djay.js",
     "stop": "pm2 stop proxy-djay",
     "logs": "pm2 logs proxy-djay",
@@ -18,10 +18,10 @@
   "license": "ISC",
   "devDependencies": {
     "@types/debug": "^4.1.5",
-    "@types/node": "^14.6.0",
+    "@types/node": "^14.6.4",
     "pkg": "^4.4.9",
-    "ts-node": "^8.10.2",
-    "typescript": "^3.9.7"
+    "ts-node": "^9.0.0",
+    "typescript": "^4.0.2"
   },
   "dependencies": {
     "config": "^3.3.1",
