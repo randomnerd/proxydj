@@ -48,11 +48,45 @@ export class ProxyInstance {
         const pidFile = path.join(dir, this.pidFilename)
         if (!existsSync(pidFile)) return
         try {
-            const pid = Number(readFileSync(pidFile).toString())
-            if (!isNaN(pid)) process.kill(pid, 'SIGINT')
-            return true
-        } catch {
-            unlinkSync(pidFile)
+            const pidStr = readFileSync(pidFile).toString().trim()
+            const pid = Number(pidStr)
+            
+            // Validate PID - must be positive integer and reasonable range
+            if (isNaN(pid) || pid <= 0 || pid > 2147483647) {
+                this.logger?.(`Invalid PID in file ${pidFile}: ${pidStr}`)
+                unlinkSync(pidFile)
+                return false
+            }
+
+            // Check if process exists before attempting to kill
+            try {
+                // Signal 0 checks if process exists without killing it
+                process.kill(pid, 0)
+                // If we get here, process exists, so kill it
+                process.kill(pid, 'SIGINT')
+                this.logger?.(`Successfully sent SIGINT to process ${pid}`)
+                return true
+            } catch (error: any) {
+                if (error.code === 'ESRCH') {
+                    // Process doesn't exist, clean up PID file
+                    this.logger?.(`Process ${pid} no longer exists, cleaning up PID file`)
+                    unlinkSync(pidFile)
+                    return false
+                } else if (error.code === 'EPERM') {
+                    // Permission denied
+                    this.logger?.(`Permission denied when trying to kill process ${pid}`)
+                    return false
+                } else {
+                    // Other error
+                    this.logger?.(`Error killing process ${pid}: ${error.message}`)
+                    return false
+                }
+            }
+        } catch (error: any) {
+            this.logger?.(`Error reading PID file ${pidFile}: ${error.message}`)
+            try {
+                unlinkSync(pidFile)
+            } catch {}
             return false
         }
     }
@@ -196,7 +230,10 @@ export class ProxyManager extends EventEmitter {
         instance.writePidFile(this.config.tmpDir)
 
         const { port, rotationTime } = instance.config
-        if (!instance.external) return
+        if (!instance.external) {
+            instance.logger(`Spawned proxy#${id} @ port ${port} (load balancing mode)`)
+            return
+        }
         this.setExternalStatus(instance.external.id, true)
         const { port: extPort, host: extHost } = instance.external
         instance.logger(`Spawned proxy#${id} @ port ${port} -> ${extHost}:${extPort}`)
@@ -218,7 +255,9 @@ export class ProxyManager extends EventEmitter {
         if (!this.instances[id]) throw new Error(`Instance ${id} not found`)
         const { config, external, logger, rotationTimer, stopping } = this.instances[id]
         this.instances[id].readPidFile(this.config.tmpDir)
-        this.setExternalStatus(external.id, false)
+        if (external) {
+            this.setExternalStatus(external.id, false)
+        }
         if (rotationTimer) clearTimeout(rotationTimer)
         if (config.ipWhitelist?.length) this.removeWhitelistFile(config)
         logger(`Proxy terminated${output?.all ? `, output:\n${output.all}` : ''}`)
@@ -305,7 +344,7 @@ export class ProxyManager extends EventEmitter {
             .values(this.proxies)
             .filter(p => p.id !== excludeId && !p.inUse)
         if (!proxies.length) throw new Error('No free external proxies')
-        const index = Math.round(Math.random() * (proxies.length - 1))
+        const index = Math.floor(Math.random() * proxies.length)
         return proxies[index]
     }
 }
